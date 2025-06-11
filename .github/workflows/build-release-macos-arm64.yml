@@ -34,39 +34,141 @@ jobs:
           cache: true
 
       - name: Install Flutter Project Dependencies
-        uses: ./.github/actions/utils/install-flutter-dependencies
+        run: |
+          flutter pub get
 
       - name: Install macOS Build Dependencies
-        uses: ./.github/actions/macos/install-dependencies
+        run: |
+          # Install required dependencies for DMG creation
+          brew install create-dmg
 
       - name: Prepare Tag Metadata
         id: get_tag_details
-        uses: ./.github/actions/utils/extract-tag-metadata
-        with:
-          github_ref: ${{ github.ref }}
+        run: |
+          # Extract tag name from GITHUB_REF
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
+          
+          # Create simple release body (you can customize this)
+          echo "release_body=Release ${TAG_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Build macOS Release Artifacts
+      - name: Build macOS Release Artifacts (DMG)
         id: build_macos_app
-        uses: ./.github/actions/macos/build-artifacts
-        with:
-          tag_name: ${{ steps.get_tag_details.outputs.tag_name }}
-          arch: arm64
+        run: |
+          # Enable macOS desktop
+          flutter config --enable-macos-desktop
+          
+          # Clean previous builds
+          echo "Cleaning previous builds..."
+          flutter clean
+          rm -rf build/macos
 
-      - name: Upload macOS Release Assets
-        uses: ./.github/actions/macos/release
+          # Build Flutter macOS app
+          echo "Building Flutter macOS app..."
+          flutter build macos --release
+
+          # Check if build was successful
+          if [ ! -d "build/macos/Build/Products/Release/gui.app" ]; then
+              echo "Error: Flutter build failed!"
+              exit 1
+          fi
+
+          # Set up variables
+          APP_NAME="Pactus GUI"
+          DMG_NAME="PactusGUI-${{ steps.get_tag_details.outputs.tag_name }}-macos-arm64"
+          TEMP_DIR="temp_dmg"
+          APP_PATH="build/macos/Build/Products/Release/gui.app"
+
+          echo "Preparing DMG contents..."
+          rm -rf "$TEMP_DIR"
+          mkdir -p "$TEMP_DIR"
+
+          # Copy the app bundle
+          cp -R "$APP_PATH" "$TEMP_DIR/$APP_NAME.app"
+
+          # Download and extract native resources directly to app bundle
+          echo "Downloading and copying native resources..."
+          curl -L -o pactus-assets.tar.gz ${{ env.MACOS_ASSETS_URL }}
+          tar -xzf pactus-assets.tar.gz --strip-components=1 -C "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/"
+
+          # Make native resources executable
+          chmod +x "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/pactus"*
+
+          # Create the launch script inside the app bundle
+          echo "Creating launch wrapper..."
+          cat > "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui_original" << 'EOF'
+          #!/bin/bash
+
+          # Get the directory where this script is located (Contents/MacOS)
+          HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+          # Set the path to native resources for macOS (they're in the same directory)
+          export PACTUS_NATIVE_RESOURCES="$HERE"
+
+          # Launch the actual GUI application
+          exec "$HERE/gui_flutter" "$@"
+          EOF
+
+          # Rename the original executable and replace with our wrapper
+          mv "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui" "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui_flutter"
+          mv "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui_original" "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui"
+          chmod +x "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui"
+
+          # Create a symbolic link to Applications folder for easy installation
+          ln -s /Applications "$TEMP_DIR/Applications"
+
+          # Create DMG
+          echo "Creating DMG file..."
+          DMG_PATH="${DMG_NAME}.dmg"
+          rm -f "$DMG_PATH"
+
+          # Create the DMG using hdiutil
+          hdiutil create -volname "$APP_NAME" -srcfolder "$TEMP_DIR" -ov -format UDZO "$DMG_PATH"
+
+          # Clean up temporary directory and assets
+          rm -rf "$TEMP_DIR"
+          rm -f pactus-assets.tar.gz
+          rm -rf pactus-cli_*
+
+          echo "DMG created successfully: $DMG_PATH"
+          
+          # Set output for the file name
+          echo "file_name=${DMG_NAME}.dmg" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.get_tag_details.outputs.tag_name }}
           release_name: ${{ steps.get_tag_details.outputs.tag_name }}
-          release_body: ${{ steps.get_tag_details.outputs.release_body }}
-          file_name: ${{ steps.build_macos_app.outputs.file_name }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          body: ${{ steps.get_tag_details.outputs.release_body }}
+          draft: false
+          prerelease: false
+
+      - name: Upload DMG to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./${{ steps.build_macos_app.outputs.file_name }}
+          asset_name: ${{ steps.build_macos_app.outputs.file_name }}
+          asset_content_type: application/x-apple-diskimage
 
       - name: Generate Release Download Links
         id: prepare_download_links
-        uses: ./.github/actions/utils/generate-download-links
-        with:
-          tag_name: ${{ steps.get_tag_details.outputs.tag_name }}
-          file_name: ${{ steps.build_macos_app.outputs.file_name }}
+        run: |
+          TAG_NAME="${{ steps.get_tag_details.outputs.tag_name }}"
+          FILE_NAME="${{ steps.build_macos_app.outputs.file_name }}"
+          REPO_NAME="${{ github.repository }}"
+          
+          DOWNLOAD_LINK="https://github.com/${REPO_NAME}/releases/download/${TAG_NAME}/${FILE_NAME}"
+          RELEASE_LINK="https://github.com/${REPO_NAME}/releases/tag/${TAG_NAME}"
+          
+          echo "download_link=${DOWNLOAD_LINK}" >> $GITHUB_OUTPUT
+          echo "release_link=${RELEASE_LINK}" >> $GITHUB_OUTPUT
 
   notify-macos-arm64:
     needs: build-and-release-macos-arm64
