@@ -91,6 +91,13 @@ jobs:
           # Make native resources executable
           chmod +x "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/pactus"*
 
+          # Ad-hoc code signing to remove security warnings
+          echo "Ad-hoc code signing the app bundle..."
+          # Sign all executables in the app bundle
+          find "$TEMP_DIR/$APP_NAME.app" -type f -perm +111 -exec codesign --force --deep --sign - {} \;
+          # Sign the app bundle itself
+          codesign --force --deep --sign - "$TEMP_DIR/$APP_NAME.app"
+
           # Create the launch script inside the app bundle
           echo "Creating launch wrapper..."
           cat > "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui_original" << 'EOF'
