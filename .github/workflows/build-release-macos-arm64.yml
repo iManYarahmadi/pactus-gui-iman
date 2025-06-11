@@ -42,6 +42,22 @@ jobs:
           # Install required dependencies for DMG creation
           brew install create-dmg
 
+      - name: Setup Code Signing
+        if: ${{ secrets.MACOS_CERTIFICATE_BASE64 && secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create keychain
+          security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD || 'temp_password' }}" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "${{ secrets.KEYCHAIN_PASSWORD || 'temp_password' }}" build.keychain
+          
+          # Import certificate
+          echo "${{ secrets.MACOS_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
+          security import certificate.p12 -k build.keychain -P "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${{ secrets.KEYCHAIN_PASSWORD || 'temp_password' }}" build.keychain
+          
+          # Clean up certificate file
+          rm certificate.p12
+
       - name: Prepare Tag Metadata
         id: get_tag_details
         uses: ./.github/actions/utils/extract-tag-metadata
@@ -90,6 +106,12 @@ jobs:
           # Make native resources executable
           chmod +x "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/pactus"*
 
+          # Fix app bundle ownership and permissions
+          echo "Fixing app bundle permissions..."
+          sudo chown -R $(whoami):staff "$TEMP_DIR/$APP_NAME.app"
+          chmod -R 755 "$TEMP_DIR/$APP_NAME.app"
+          chmod +x "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/"*
+
           # Create the launch script inside the app bundle
           echo "Creating launch wrapper..."
           cat > "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui_original" << 'EOF'
@@ -110,6 +132,48 @@ jobs:
           mv "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui_original" "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui"
           chmod +x "$TEMP_DIR/$APP_NAME.app/Contents/MacOS/gui"
 
+          # Code sign the app bundle if certificates are available
+          if [[ -n "${{ secrets.MACOS_CERTIFICATE_BASE64 }}" && -n "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" ]]; then
+            echo "Code signing app bundle..."
+            
+            # Find the certificate identity
+            CERT_IDENTITY=$(security find-identity -v -p codesigning build.keychain | head -n 1 | grep -o '"[^"]*"' | tr -d '"')
+            echo "Using certificate identity: $CERT_IDENTITY"
+            
+            # Sign all executables and frameworks first
+            find "$TEMP_DIR/$APP_NAME.app" -type f \( -name "*.dylib" -o -name "*.framework" \) -exec codesign --force --verify --verbose --sign "$CERT_IDENTITY" {} \;
+            find "$TEMP_DIR/$APP_NAME.app/Contents/MacOS" -type f -perm +111 -exec codesign --force --verify --verbose --sign "$CERT_IDENTITY" {} \;
+            
+            # Sign the main app bundle
+            codesign --force --verify --verbose --sign "$CERT_IDENTITY" --entitlements macos/Runner/Release.entitlements --options runtime "$TEMP_DIR/$APP_NAME.app"
+            
+            # Verify the signature
+            codesign --verify --verbose=4 "$TEMP_DIR/$APP_NAME.app"
+            
+            # Notarize the app if Apple ID credentials are available
+            if [[ -n "${{ secrets.APPLE_ID }}" && -n "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" && -n "${{ secrets.APPLE_TEAM_ID }}" ]]; then
+              echo "Creating archive for notarization..."
+              ditto -c -k --keepParent "$TEMP_DIR/$APP_NAME.app" "$TEMP_DIR/app-for-notarization.zip"
+              
+              echo "Submitting app for notarization..."
+              xcrun notarytool submit "$TEMP_DIR/app-for-notarization.zip" \
+                --apple-id "${{ secrets.APPLE_ID }}" \
+                --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+                --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+                --wait
+              
+              echo "Stapling notarization to app..."
+              xcrun stapler staple "$TEMP_DIR/$APP_NAME.app"
+              
+              # Clean up notarization archive
+              rm "$TEMP_DIR/app-for-notarization.zip"
+            else
+              echo "Skipping notarization - Apple ID credentials not provided"
+            fi
+          else
+            echo "Skipping code signing - certificates not provided"
+          fi
+
           # Create a symbolic link to Applications folder for easy installation
           ln -s /Applications "$TEMP_DIR/Applications"
 
@@ -125,6 +189,11 @@ jobs:
           rm -rf "$TEMP_DIR"
           rm -f pactus-assets.tar.gz
           rm -rf pactus-cli_*
+
+          # Clean up keychain if it was created
+          if [[ -n "${{ secrets.MACOS_CERTIFICATE_BASE64 }}" && -n "${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" ]]; then
+            security delete-keychain build.keychain || true
+          fi
 
           echo "DMG created successfully: $DMG_PATH"
           
