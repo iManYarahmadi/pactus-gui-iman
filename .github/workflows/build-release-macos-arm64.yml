@@ -44,13 +44,9 @@ jobs:
 
       - name: Prepare Tag Metadata
         id: get_tag_details
-        run: |
-          # Extract tag name from GITHUB_REF
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          echo "tag_name=${TAG_NAME}" >> $GITHUB_OUTPUT
-          
-          # Create simple release body (you can customize this)
-          echo "release_body=Release ${TAG_NAME}" >> $GITHUB_OUTPUT
+        uses: ./.github/actions/utils/extract-tag-metadata
+        with:
+          github_ref: ${{ github.ref }}
 
       - name: Build macOS Release Artifacts (DMG)
         id: build_macos_app
@@ -135,40 +131,27 @@ jobs:
           # Set output for the file name
           echo "file_name=${DMG_NAME}.dmg" >> $GITHUB_OUTPUT
 
-      - name: Create Release
+      - name: Create Release and Upload DMG
         id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.get_tag_details.outputs.tag_name }}
-          release_name: ${{ steps.get_tag_details.outputs.tag_name }}
+          name: ${{ steps.get_tag_details.outputs.tag_name }}
           body: ${{ steps.get_tag_details.outputs.release_body }}
+          files: ./${{ steps.build_macos_app.outputs.file_name }}
           draft: false
           prerelease: false
-
-      - name: Upload DMG to Release
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./${{ steps.build_macos_app.outputs.file_name }}
-          asset_name: ${{ steps.build_macos_app.outputs.file_name }}
-          asset_content_type: application/x-apple-diskimage
+          generate_release_notes: true
 
       - name: Generate Release Download Links
         id: prepare_download_links
-        run: |
-          TAG_NAME="${{ steps.get_tag_details.outputs.tag_name }}"
-          FILE_NAME="${{ steps.build_macos_app.outputs.file_name }}"
-          REPO_NAME="${{ github.repository }}"
-          
-          DOWNLOAD_LINK="https://github.com/${REPO_NAME}/releases/download/${TAG_NAME}/${FILE_NAME}"
-          RELEASE_LINK="https://github.com/${REPO_NAME}/releases/tag/${TAG_NAME}"
-          
-          echo "download_link=${DOWNLOAD_LINK}" >> $GITHUB_OUTPUT
-          echo "release_link=${RELEASE_LINK}" >> $GITHUB_OUTPUT
+        uses: ./.github/actions/utils/generate-download-links
+        with:
+          tag_name: ${{ steps.get_tag_details.outputs.tag_name }}
+          file_name: ${{ steps.build_macos_app.outputs.file_name }}
 
   notify-macos-arm64:
     needs: build-and-release-macos-arm64
