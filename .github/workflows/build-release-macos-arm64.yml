@@ -43,7 +43,7 @@ jobs:
           brew install create-dmg
 
       - name: Setup Code Signing
-        if: secrets.MACOS_CERTIFICATE_BASE64 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != ''
+        if: ${{ secrets.MACOS_CERTIFICATE_BASE64 != '' && secrets.MACOS_CERTIFICATE_PASSWORD != '' }}
         run: |
           # Create keychain
           security create-keychain -p "${{ secrets.KEYCHAIN_PASSWORD || 'temp_password' }}" build.keychain
